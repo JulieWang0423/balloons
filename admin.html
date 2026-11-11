@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>气球管理</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;600&family=Nunito:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #e9f0f4; --paper: #fbf6ea; --ink: #3a4654; --ink-soft: #6b7887; --accent: #c8735a; --line: #e2d8c3;
+  --font: "Nunito", "Noto Serif SC", "Songti SC", serif;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font); }
+main { max-width: 640px; margin: 0 auto; padding: calc(env(safe-area-inset-top) + 20px) 16px 40px; display: flex; flex-direction: column; gap: 14px; }
+h1 { font-size: 20px; margin: 0; font-weight: 700; }
+.bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.who { font-size: 13px; color: var(--ink-soft); }
+button { font: 600 15px var(--font); border-radius: 6px; cursor: pointer; }
+.primary { background: var(--accent); color: #fff; border: 0; padding: 12px 18px; }
+.ghost { background: none; border: 1px solid var(--line); color: var(--ink); padding: 6px 12px; font-size: 13px; }
+.note { font-size: 13px; color: var(--ink-soft); line-height: 1.5; margin: 0; }
+ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+li { background: var(--paper); border-radius: 6px; padding: 12px 12px 12px 14px; display: flex; gap: 12px; align-items: center; }
+li.flag { box-shadow: inset 4px 0 0 var(--accent); }
+.txt { flex: 1; min-width: 0; font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; }
+.time { display: block; font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+.del { background: #fff; border: 1px solid var(--line); color: var(--accent); padding: 10px 12px; min-width: 76px; }
+.del.arm { background: var(--accent); color: #fff; border-color: var(--accent); }
+.count { font-size: 13px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+#err { color: #a8432c; font-size: 14px; }
+button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar"><h1>气球管理</h1><span class="count" id="count"></span></div>
+  <div id="signin" hidden>
+    <p class="note">用管理员的 Google 账号登录。只有写进 Firestore 规则里的邮箱能删除答案。</p>
+    <p><button class="primary" id="login">用 Google 登录</button></p>
+  </div>
+  <div class="bar" id="me" hidden><span class="who" id="who"></span><button class="ghost" id="logout">退出</button></div>
+  <p class="note" id="hint" hidden>最新的在最上面。点一次“删除”会变成“确认”，3 秒内再点一次才会真正删除。删掉的气球会马上从所有人的屏幕上消失。带红色竖条的是命中了屏蔽词的（观众那边本来就看不到）。</p>
+  <div id="err"></div>
+  <ul id="list"></ul>
+</main>
+<script type="module">
+import { firebaseConfig, BLOCKLIST } from "./config.js";
+const FB = "https://www.gstatic.com/firebasejs/10.12.2/";
+const $ = id => document.getElementById(id);
+if (firebaseConfig.apiKey.startsWith("PASTE")) {
+  $("err").textContent = "还没有填 config.js 里的 firebaseConfig。";
+} else {
+  const { initializeApp } = await import(FB + "firebase-app.js");
+  const au = await import(FB + "firebase-auth.js");
+  const fs = await import(FB + "firebase-firestore.js");
+  const app = initializeApp(firebaseConfig);
+  const auth = au.getAuth(app), db = fs.getFirestore(app);
+  const norm = s => s.toLowerCase().replace(/[\s.\-_*·,，。!！?？]/g, "");
+  const blocked = s => { const n = norm(s); return BLOCKLIST.some(w => n.includes(norm(w))); };
+  let unsub = null;
+
+  $("login").onclick = () => au.signInWithPopup(auth, new au.GoogleAuthProvider()).catch(e => $("err").textContent = "登录失败：" + e.code);
+  $("logout").onclick = () => au.signOut(auth);
+
+  au.onAuthStateChanged(auth, user => {
+    $("signin").hidden = !!user; $("me").hidden = !user; $("hint").hidden = !user;
+    $("list").innerHTML = ""; $("count").textContent = ""; $("err").textContent = "";
+    if (unsub) { unsub(); unsub = null; }
+    if (!user) return;
+    $("who").textContent = user.email;
+    unsub = fs.onSnapshot(fs.query(fs.collection(db, "answers"), fs.orderBy("createdAt", "desc")), snap => {
+      $("count").textContent = snap.size + " 个气球";
+      const ul = $("list"); ul.innerHTML = "";
+      snap.forEach(d => {
+        const data = d.data({ serverTimestamps: "estimate" });
+        const li = document.createElement("li");
+        if (blocked(String(data.text || ""))) li.className = "flag";
+        const txt = document.createElement("div"); txt.className = "txt";
+        txt.textContent = data.text;
+        const time = document.createElement("span"); time.className = "time";
+        time.textContent = data.createdAt ? data.createdAt.toDate().toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+        txt.appendChild(time);
+        const btn = document.createElement("button"); btn.className = "del"; btn.textContent = "删除";
+        let t;
+        btn.onclick = async () => {
+          if (!btn.classList.contains("arm")) {
+            btn.classList.add("arm"); btn.textContent = "确认";
+            t = setTimeout(() => { btn.classList.remove("arm"); btn.textContent = "删除"; }, 3000);
+            return;
+          }
+          clearTimeout(t); btn.disabled = true; btn.textContent = "…";
+          try { await fs.deleteDoc(d.ref); }
+          catch (e) { $("err").textContent = "删不掉：这个账号不是管理员，或者网络断了（" + e.code + "）"; btn.disabled = false; btn.classList.remove("arm"); btn.textContent = "删除"; }
+        };
+        li.append(txt, btn); ul.appendChild(li);
+      });
+    }, e => { $("err").textContent = "读取失败：" + e.code; });
+  });
+}
+</script>
+</body>
+</html>
